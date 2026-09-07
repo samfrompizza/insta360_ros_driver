@@ -25,7 +25,7 @@ extern "C" {
 static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
     const enum AVPixelFormat *p;
     for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-        if (*p == AV_PIX_FMT_CUDA) {
+        if (*p == AV_PIX_FMT_CUDA || *p == AV_PIX_FMT_VAAPI) {
             return *p;
         }
     }
@@ -60,32 +60,45 @@ private:
     bool i_frame_only_ = false;
 
     void InitFFmpegDecoder() {
-        hw_type_ = AV_HWDEVICE_TYPE_CUDA;
-        const char* decoder_name = "h264_cuvid";
+        struct HwCandidate {
+            enum AVHWDeviceType type;
+            const char* decoder_name;
+            const char* display_name;
+        };
+        const HwCandidate candidates[] = {
+            { AV_HWDEVICE_TYPE_VAAPI, "h264_vaapi", "VAAPI (AMD/Intel)" },
+            { AV_HWDEVICE_TYPE_CUDA, "h264_cuvid", "NVDEC (NVIDIA)" },
+        };
 
-        codec_ = avcodec_find_decoder_by_name(decoder_name);
+        hw_type_ = AV_HWDEVICE_TYPE_NONE;
+        codec_ = nullptr;
+        hw_device_ctx_ = nullptr;
+
+        for(const auto& cand : candidates) {
+            codec_ = avcodec_find_decoder_by_name(cand.decoder_name);
+            if (!codec_) {
+                RCLCPP_WARN(this->get_logger(), "Decoder '%s' not found", cand.decoder_name);
+                continue;
+            }
+            int err = av_hwdevice_ctx_create(&hw_device_ctx_, cand.type, nullptr, nullptr, 0);
+            if (err < 0) {
+                RCLCPP_WARN(this->get_logger(), "Failed to create %s device context (err=%d), trying next",
+                        cand.display_name, err);
+                av_buffer_unref(&hw_device_ctx_);
+                codec_ = nullptr;
+                continue;
+            }
+            hw_type_ = cand.type;
+            RCLCPP_INFO(this->get_logger(), "Using hardware H.264 decoder (%s)", cand.display_name);
+            break;
+        }
+
         if (!codec_) {
-            RCLCPP_WARN(this->get_logger(), "Hardware decoder not available, falling back to software");
-            hw_type_ = AV_HWDEVICE_TYPE_NONE;
+            RCLCPP_WARN(this->get_logger(), "No hardware decoder available, falling back to software");
             codec_ = avcodec_find_decoder(AV_CODEC_ID_H264);
             if (!codec_) {
                 RCLCPP_ERROR(this->get_logger(), "No H.264 decoder available");
                 return;
-            }
-        } else {
-            RCLCPP_INFO(this->get_logger(), "Using hardware H.264 decoder (NVDEC)");
-        }
-
-        if (hw_type_ != AV_HWDEVICE_TYPE_NONE) {
-            int err = av_hwdevice_ctx_create(&hw_device_ctx_, hw_type_, nullptr, nullptr, 0);
-            if (err < 0) {
-                RCLCPP_WARN(this->get_logger(), "Failed to create hardware device context, falling back to software");
-                hw_type_ = AV_HWDEVICE_TYPE_NONE;
-                codec_ = avcodec_find_decoder(AV_CODEC_ID_H264);
-                if (!codec_) {
-                    RCLCPP_ERROR(this->get_logger(), "No H.264 decoder available");
-                    return;
-                }
             }
         }
 

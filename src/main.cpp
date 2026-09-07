@@ -4,9 +4,9 @@
 #include <vector>
 #include <atomic>
 
-#include <camera/camera.h>
-#include <camera/photography_settings.h>
-#include <camera/device_discovery.h>
+#include <../include/camera.h>
+#include <../include/photography_settings.h>
+#include <../include/device_discovery.h>
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/qos.hpp"
