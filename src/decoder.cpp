@@ -22,16 +22,6 @@ extern "C" {
     #include <libavutil/imgutils.h>
 }
 
-static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
-    const enum AVPixelFormat *p;
-    for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
-        if (*p == AV_PIX_FMT_CUDA || *p == AV_PIX_FMT_VAAPI) {
-            return *p;
-        }
-    }
-    return AV_PIX_FMT_NONE;
-}
-
 class H264DecoderNode : public rclcpp::Node {
 private:
     AVCodec* codec_ = nullptr;
@@ -44,6 +34,19 @@ private:
     cv::Mat bgr_frame_; 
     AVBufferRef *hw_device_ctx_ = nullptr;
     enum AVHWDeviceType hw_type_ = AV_HWDEVICE_TYPE_NONE;
+    static enum AVPixelFormat hw_pix_fmt_;
+
+    // FFmpeg get_format callback: return the pixel format matching the selected
+    // hardware device type (hw_pix_fmt_), not the first CUDA/VAAPI in the list.
+    static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
+        (void)ctx;
+        for (const enum AVPixelFormat *p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+            if (*p == hw_pix_fmt_) {
+                return *p;
+            }
+        }
+        return AV_PIX_FMT_NONE;
+    }
 
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr subscription_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher_;
@@ -66,8 +69,8 @@ private:
             const char* display_name;
         };
         const HwCandidate candidates[] = {
-            { AV_HWDEVICE_TYPE_VAAPI, "h264_vaapi", "VAAPI (AMD/Intel)" },
-            { AV_HWDEVICE_TYPE_CUDA, "h264_cuvid", "NVDEC (NVIDIA)" },
+            { AV_HWDEVICE_TYPE_VAAPI, nullptr,      "VAAPI (AMD/Intel)" },  // hwaccel, а не декодер
+            { AV_HWDEVICE_TYPE_CUDA, "h264_cuvid",  "NVDEC (NVIDIA)" },
         };
 
         hw_type_ = AV_HWDEVICE_TYPE_NONE;
@@ -75,9 +78,12 @@ private:
         hw_device_ctx_ = nullptr;
 
         for(const auto& cand : candidates) {
-            codec_ = avcodec_find_decoder_by_name(cand.decoder_name);
+            codec_ = cand.decoder_name
+                   ? avcodec_find_decoder_by_name(cand.decoder_name)
+                   : avcodec_find_decoder(AV_CODEC_ID_H264);
             if (!codec_) {
-                RCLCPP_WARN(this->get_logger(), "Decoder '%s' not found", cand.decoder_name);
+                RCLCPP_WARN(this->get_logger(), "Decoder '%s' not found",
+                        cand.decoder_name ? cand.decoder_name : "h264");
                 continue;
             }
             int err = av_hwdevice_ctx_create(&hw_device_ctx_, cand.type, nullptr, nullptr, 0);
@@ -89,6 +95,7 @@ private:
                 continue;
             }
             hw_type_ = cand.type;
+            hw_pix_fmt_ = (cand.type == AV_HWDEVICE_TYPE_VAAPI) ? AV_PIX_FMT_VAAPI : AV_PIX_FMT_CUDA;
             RCLCPP_INFO(this->get_logger(), "Using hardware H.264 decoder (%s)", cand.display_name);
             break;
         }
@@ -359,6 +366,8 @@ public:
         CleanupFFmpegDecoder();
     }
 };
+
+enum AVPixelFormat H264DecoderNode::hw_pix_fmt_ = AV_PIX_FMT_NONE;
 
 int main(int argc, char* argv[]) {
     rclcpp::init(argc, argv);
